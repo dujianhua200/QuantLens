@@ -312,7 +312,8 @@ enum SignalEngine {
         // 缩量止跌后首放量
         if index >= 6 {
             let prev5Vol = (0..<5).map { vols[index - 1 - $0] }.reduce(0, +) / 5
-            let prev5Range = (0..<5).map { ctx.candles[index - 1 - $0].range / ctx.candles[index - 1 - $0].close }.reduce(0, +) / 5
+            let prev5Ranges = (0..<5).map { ctx.candles[index - 1 - $0].range / ctx.candles[index - 1 - $0].close }
+            let prev5Range = prev5Ranges.reduce(0, +) / 5
             if prev5Vol < volMA20 * 0.75, c.volume > prev5Vol * 1.8, c.close > c.open, prev5Range < 0.035 {
                 e.accumulate.add(16, "窄幅缩量整理后首次显著放量收阳，资金入场")
             }
