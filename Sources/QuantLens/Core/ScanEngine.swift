@@ -60,7 +60,7 @@ struct ScanResult: Identifiable, Hashable {
 
 // MARK: - 结论分级
 
-enum ScanGrade: String, Comparable {
+enum ScanGrade: String, Comparable, Hashable {
     case strong = "强烈推荐"
     case buy = "可买入"
     case watch = "观察"
