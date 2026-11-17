@@ -202,6 +202,79 @@ enum Indicators {
         return out
     }
 
+    // MARK: - ADX 趋势强度
+
+    /// ADX(14)：Wilder 平滑。返回值与输入等长，ADX 未形成前用 NaN 占位。
+    ///
+    /// 口径（TA-Lib ADX 一致）：+DM/-DM 取相邻 K 线高低点差值的有方向部分，
+    /// TR 平滑后得 +DI/-DI，DX = |+DI−-DI| / (+DI+-DI) × 100，
+    /// ADX 为 DX 的 Wilder 平滑（首值取前 period 个 DX 的均值）。
+    /// ADX 只衡量趋势强度、不分方向：>25 常作趋势市参考，<25 常作震荡市参考。
+    static func adx(_ candles: [Candle], period: Int = 14) -> [Double] {
+        let n = candles.count
+        var out = Array(repeating: Double.nan, count: n)
+        guard n > period * 2, period > 0 else { return out }
+
+        let tr = trueRange(candles)
+        var plusDM = Array(repeating: 0.0, count: n)
+        var minusDM = Array(repeating: 0.0, count: n)
+        for i in 1..<n {
+            let upMove = candles[i].high - candles[i - 1].high
+            let downMove = candles[i - 1].low - candles[i].low
+            if upMove > downMove, upMove > 0 { plusDM[i] = upMove }
+            if downMove > upMove, downMove > 0 { minusDM[i] = downMove }
+        }
+
+        // Wilder 平滑：首值取前 period 项之和，之后递推
+        var smTR = Array(repeating: 0.0, count: n)
+        var smPlus = Array(repeating: 0.0, count: n)
+        var smMinus = Array(repeating: 0.0, count: n)
+        var sumTR = 0.0
+        var sumPlus = 0.0
+        var sumMinus = 0.0
+        for i in 1...period {
+            sumTR += tr[i]
+            sumPlus += plusDM[i]
+            sumMinus += minusDM[i]
+        }
+        smTR[period] = sumTR
+        smPlus[period] = sumPlus
+        smMinus[period] = sumMinus
+        let p = Double(period)
+        for i in (period + 1)..<n {
+            smTR[i] = smTR[i - 1] - smTR[i - 1] / p + tr[i]
+            smPlus[i] = smPlus[i - 1] - smPlus[i - 1] / p + plusDM[i]
+            smMinus[i] = smMinus[i - 1] - smMinus[i - 1] / p + minusDM[i]
+        }
+
+        var dx = Array(repeating: Double.nan, count: n)
+        for i in period..<n {
+            guard smTR[i] > 0 else { continue }
+            let plusDI = 100 * smPlus[i] / smTR[i]
+            let minusDI = 100 * smMinus[i] / smTR[i]
+            let denom = plusDI + minusDI
+            dx[i] = denom > 0 ? 100 * abs(plusDI - minusDI) / denom : 0
+        }
+
+        // ADX 首值：前 period 个 DX 的均值，位置在 2*period-1
+        let firstADX = 2 * period - 1
+        var sumDX = 0.0
+        var dxCount = 0
+        for i in period...firstADX {
+            if dx[i].isFinite {
+                sumDX += dx[i]
+                dxCount += 1
+            }
+        }
+        guard dxCount > 0 else { return out }
+        out[firstADX] = sumDX / Double(dxCount)
+        for i in (firstADX + 1)..<n {
+            guard dx[i].isFinite else { continue }
+            out[i] = (out[i - 1] * (p - 1) + dx[i]) / p
+        }
+        return out
+    }
+
     // MARK: - OBV / 量能
 
     static func obv(_ candles: [Candle]) -> [Double] {

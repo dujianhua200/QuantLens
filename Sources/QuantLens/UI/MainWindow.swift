@@ -394,6 +394,13 @@ final class AISettingsPanel: PanelBase {
     private let resultLabel = L.label("", size: 8.5, color: Theme.textFaint)
     private let maxCandidates = NSTextField()
 
+    // 本地模型（Ollama）区：只做信号解释，默认关闭
+    private let localEnableSwitch = NSSwitch()
+    private let localBaseURLField = NSTextField()
+    private let localModelField = NSTextField()
+    private let localTestButton = NSButton()
+    private let localResultLabel = L.label("", size: 8.5, color: Theme.textFaint)
+
     init() {
         super.init(title: "AI 接入", icon: "sparkles")
         build()
@@ -507,6 +514,99 @@ final class AISettingsPanel: PanelBase {
         hint.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
 
         resultLabel.stringValue = AppState.shared.aiStatus.isEmpty ? "" : AppState.shared.aiStatus
+
+        buildLocalLLMSection()
+    }
+
+    // MARK: - 本地模型（Ollama）区
+
+    private func buildLocalLLMSection() {
+        let cfg = AppState.shared.localLLMConfig
+
+        let divider = L.label("本地模型解释（Ollama）", size: 9, weight: .semibold, color: Theme.textDim)
+        addBody(divider)
+        divider.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+
+        localEnableSwitch.state = cfg.enabled ? .on : .off
+        localEnableSwitch.controlSize = .small
+        localEnableSwitch.target = self
+        localEnableSwitch.action = #selector(saveLocalLLM)
+        localEnableSwitch.translatesAutoresizingMaskIntoConstraints = false
+        let enableRow = L.hstack([L.label("启用本地解释", size: 9.5, color: Theme.textDim), L.spacer(), localEnableSwitch], spacing: 4)
+        addBody(enableRow)
+        enableRow.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+
+        localBaseURLField.placeholderString = "http://localhost:11434/v1"
+        localBaseURLField.font = Fonts.mono(9.5)
+        localBaseURLField.isBordered = true
+        localBaseURLField.bezelStyle = .roundedBezel
+        localBaseURLField.focusRingType = .none
+        localBaseURLField.stringValue = cfg.baseURL
+        localBaseURLField.translatesAutoresizingMaskIntoConstraints = false
+        localBaseURLField.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        localBaseURLField.target = self
+        localBaseURLField.action = #selector(saveLocalLLM)
+        addField("Ollama 地址", localBaseURLField)
+
+        localModelField.placeholderString = "qwen2.5:3b"
+        localModelField.font = Fonts.mono(9.5)
+        localModelField.isBordered = true
+        localModelField.bezelStyle = .roundedBezel
+        localModelField.focusRingType = .none
+        localModelField.stringValue = cfg.model
+        localModelField.translatesAutoresizingMaskIntoConstraints = false
+        localModelField.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        localModelField.target = self
+        localModelField.action = #selector(saveLocalLLM)
+        addField("模型", localModelField)
+
+        localTestButton.title = "测试本地端点"
+        localTestButton.setButtonType(.momentaryChange)
+        localTestButton.isBordered = false
+        localTestButton.attributedTitle = NSAttributedString(string: "测试本地端点", attributes: [
+            .font: Fonts.ui(9.5), .foregroundColor: Theme.accent
+        ])
+        localTestButton.wantsLayer = true
+        localTestButton.layer?.backgroundColor = Theme.accent.withAlphaComponent(0.13).cgColor
+        localTestButton.layer?.cornerRadius = 3
+        localTestButton.target = self
+        localTestButton.action = #selector(testLocalLLM)
+        localTestButton.translatesAutoresizingMaskIntoConstraints = false
+        localTestButton.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        let localTestRow = L.hstack([localTestButton, L.spacer(), localResultLabel], spacing: 6)
+        addBody(localTestRow)
+        localTestRow.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+
+        let localHint = L.wrapped("本地模型只解释规则算好的信号，不参与决策、不新增信号。需自行安装 Ollama 并 pull 模型（8GB 内存建议 qwen2.5:3b，7B 会卡顿）。端点不通或输出校验失败时自动回落模板文字。模型会编造、算术不可靠，以数字为准。",
+                                  size: 8, color: Theme.textFaint)
+        localHint.preferredMaxLayoutWidth = 270
+        addBody(localHint)
+        localHint.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+    }
+
+    @objc private func saveLocalLLM() {
+        var cfg = AppState.shared.localLLMConfig
+        cfg.enabled = localEnableSwitch.state == .on
+        cfg.baseURL = localBaseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        cfg.model = localModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        AppState.shared.saveLocalLLMConfig(cfg)
+    }
+
+    @objc private func testLocalLLM() {
+        saveLocalLLM()
+        let cfg = AppState.shared.localLLMConfig
+        guard cfg.isUsable else {
+            localResultLabel.stringValue = "✗ 请先启用开关并填写模型名"
+            localResultLabel.textColor = Theme.distribute
+            return
+        }
+        localResultLabel.stringValue = "测试中…"
+        localResultLabel.textColor = Theme.textDim
+        Task { @MainActor in
+            let ok = await LocalLLMClient.shared.checkAvailable(config: cfg)
+            self.localResultLabel.stringValue = ok ? "✓ 本地端点连通" : "✗ 端点不通（Ollama 未启动？）"
+            self.localResultLabel.textColor = ok ? Theme.buy : Theme.distribute
+        }
     }
 
     deinit {
@@ -524,6 +624,10 @@ final class AISettingsPanel: PanelBase {
         if keyField.currentEditor() == nil { keyField.stringValue = cfg.apiKey }
         if modelField.currentEditor() == nil { modelField.stringValue = cfg.model }
         if maxCandidates.currentEditor() == nil { maxCandidates.stringValue = "\(cfg.maxCandidatesPerScan)" }
+        let local = AppState.shared.localLLMConfig
+        localEnableSwitch.state = local.enabled ? .on : .off
+        if localBaseURLField.currentEditor() == nil { localBaseURLField.stringValue = local.baseURL }
+        if localModelField.currentEditor() == nil { localModelField.stringValue = local.model }
     }
 
     @objc private func onAIChanged() {
@@ -1076,7 +1180,9 @@ final class MainWindow: NSWindowController {
         chart.update(context: analysis.context,
                      markers: analysis.markers,
                      levels: analysis.context.levels,
-                     intraday: app.period.isIntraday)
+                     intraday: app.period.isIntraday,
+                     tradePoints: analysis.tradePoints,
+                     fearHistory: analysis.fearHistory)
     }
 
     private func refreshPanels() {

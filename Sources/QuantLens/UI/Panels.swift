@@ -502,7 +502,8 @@ final class SignalDetailPanel: PanelBase {
             v.removeFromSuperview()
         }
 
-        guard let a = AppState.shared.analysis, (!a.signals.isEmpty || !a.fearSignals.isEmpty) else {
+        guard let a = AppState.shared.analysis,
+              (!a.signals.isEmpty || !a.fearSignals.isEmpty || !a.tradePoints.isEmpty) else {
             let icon = NSImageView()
             icon.image = NSImage(systemSymbolName: "checkmark.seal", accessibilityDescription: nil)
             icon.contentTintColor = Theme.textFaint
@@ -513,6 +514,9 @@ final class SignalDetailPanel: PanelBase {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             return
         }
+
+        // ---- 买卖点（新引擎日线点 + 当日分时触发，同一列表按时间倒序） ----
+        addTradePointsSection(analysis: a)
 
         for sig in a.signals {
             let color = Theme.color(for: sig.kind)
@@ -586,6 +590,146 @@ final class SignalDetailPanel: PanelBase {
                 stack.addArrangedSubview(col)
                 col.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             }
+        }
+    }
+
+    // MARK: - 买卖点列表
+
+    private func addTradePointsSection(analysis a: Analysis) {
+        let app = AppState.shared
+        // 日线点 + 当前标的的当日分时触发，合并按时间倒序
+        var rows: [(date: Date, direction: TradeDirection, title: String, source: String,
+                    price: Double, detail: String, reason: String, strong: Bool, vetoed: Bool)] = []
+        for p in a.tradePoints {
+            let rText = String(format: "%.1f", p.rMultiple)
+            let detail = "止损 \(Fmt.price(p.stopLoss)) · 目标 \(Fmt.price(p.target)) · \(rText)R"
+            rows.append((p.date, p.direction, p.kind.label, "日线", p.price, detail, p.reason,
+                         p.isStrong, p.isVetoed))
+        }
+        if let currentID = app.selected?.id {
+            for e in app.buyPointEntries where e.security.id == currentID {
+                let t = e.trigger
+                rows.append((t.time, t.direction, t.kind.label, "分时", t.price,
+                             "强度 \(Fmt.price(t.strength, decimals: 0))", t.reason, false, false))
+            }
+        }
+        guard !rows.isEmpty else { return }
+        rows.sort { $0.date > $1.date }
+
+        let title = L.label("买卖点 · 日线 + 分时", size: 9, weight: .semibold, color: Theme.textDim)
+        stack.addArrangedSubview(title)
+        title.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        for row in rows.prefix(8) {
+            let color = row.direction == .buy ? Theme.up : Theme.down
+            let dirLabel = L.label(row.direction.shortLabel, size: 10, weight: .bold, color: color)
+            let name = L.label(row.title, size: 10, weight: .semibold, color: color)
+            let src = L.label(row.source, size: 8, color: Theme.textFaint)
+            let dateText = L.label(Fmt.date(row.date, intraday: row.source == "分时"),
+                                   size: 9, color: Theme.textDim, mono: true)
+            let priceText = L.label(Fmt.price(row.price), size: 10, weight: .bold, color: color, mono: true)
+            priceText.alignment = .right
+            var headItems: [NSView] = [dirLabel, name, src]
+            if row.strong {
+                headItems.append(L.label("强", size: 8, weight: .bold, color: Theme.risk))
+            }
+            if row.vetoed {
+                headItems.append(L.label("环境否决", size: 8, color: Theme.textFaint))
+            }
+            headItems.append(L.spacer())
+            headItems.append(dateText)
+            headItems.append(priceText)
+            let head = L.hstack(headItems, spacing: 5)
+
+            let detailLine = L.wrapped(row.detail, size: 9, color: Theme.text.withAlphaComponent(0.75))
+            let reasonLine = L.wrapped(row.reason, size: 9.5, color: Theme.text.withAlphaComponent(0.70))
+            let col = L.vstack([head, detailLine, reasonLine], spacing: 3)
+            col.translatesAutoresizingMaskIntoConstraints = false
+            head.widthAnchor.constraint(equalTo: col.widthAnchor).isActive = true
+            stack.addArrangedSubview(col)
+            col.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        let t1Note = L.wrapped("T+1 提示：日内止损只是提醒，隔夜跳空可能穿止损；买卖点为规则信号展示，不构成操作建议。",
+                               size: 8, color: Theme.textFaint)
+        stack.addArrangedSubview(t1Note)
+        t1Note.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        // 本地模型解读（仅开启时显示；模型不可用或校验失败时回落模板文字）
+        if app.localLLMConfig.isUsable {
+            addLLMExplainRow(analysis: a)
+        }
+    }
+
+    private func addLLMExplainRow(analysis a: Analysis) {
+        let resultLabel = L.wrapped("", size: 9.5, color: Theme.text.withAlphaComponent(0.75))
+        resultLabel.isHidden = true
+        let button = NSButton()
+        button.title = "本地模型解读"
+        button.setButtonType(.momentaryChange)
+        button.isBordered = false
+        button.attributedTitle = NSAttributedString(string: "本地模型解读", attributes: [
+            .font: Fonts.ui(9.5), .foregroundColor: Theme.accent
+        ])
+        button.wantsLayer = true
+        button.layer?.backgroundColor = Theme.accent.withAlphaComponent(0.13).cgColor
+        button.layer?.cornerRadius = 3
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        let statusLabel = L.label("", size: 8.5, color: Theme.textFaint)
+        let row = L.hstack([button, L.spacer(), statusLabel], spacing: 6)
+        stack.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        stack.addArrangedSubview(resultLabel)
+        resultLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        // 用 target-action 承载异步调用，避免闭包持有已重建的视图
+        let action = LLMExplainAction(button: button, resultLabel: resultLabel, statusLabel: statusLabel,
+                                      points: a.tradePoints)
+        button.target = action
+        button.action = #selector(LLMExplainAction.run)
+        // action 由按钮的 associated object 持有（见下方扩展）
+        objc_setAssociatedObject(button, &llmActionKey, action, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+}
+
+// MARK: - 本地模型解读动作（避免闭包持有重建视图）
+
+private var llmActionKey: UInt8 = 0
+
+private final class LLMExplainAction: NSObject {
+    private weak var button: NSButton?
+    private weak var resultLabel: NSTextField?
+    private weak var statusLabel: NSTextField?
+    private let points: [TradePointSignal]
+
+    init(button: NSButton, resultLabel: NSTextField, statusLabel: NSTextField, points: [TradePointSignal]) {
+        self.button = button
+        self.resultLabel = resultLabel
+        self.statusLabel = statusLabel
+        self.points = points
+    }
+
+    @objc func run() {
+        guard let button, let resultLabel, let statusLabel else { return }
+        button.isEnabled = false
+        statusLabel.stringValue = "本地模型解读中…"
+        statusLabel.textColor = Theme.textDim
+        let app = AppState.shared
+        let cfg = app.localLLMConfig
+        let breadth = app.emotionSnapshot?.breadth
+        let points = self.points
+        Task { @MainActor in
+            let (text, fromLLM) = await LocalLLMClient.shared.explain(
+                points: points, breadth: breadth, config: cfg
+            )
+            // 面板可能已重建：视图脱离层级时不再更新
+            guard resultLabel.superview != nil else { return }
+            resultLabel.isHidden = false
+            resultLabel.stringValue = text
+            statusLabel.stringValue = fromLLM ? "本地模型解读（已校验数字）" : "模板解读（本地模型不可用或校验未通过）"
+            statusLabel.textColor = Theme.textFaint
+            button.isEnabled = true
         }
     }
 }

@@ -32,6 +32,7 @@ final class AppState {
     static let didChangeLargeOrderScan = Notification.Name("QuantLens.didChangeLargeOrderScan")
     static let didChangeAuction = Notification.Name("QuantLens.didChangeAuction")
     static let didChangeEmotion = Notification.Name("QuantLens.didChangeEmotion")
+    static let didChangeLocalLLM = Notification.Name("QuantLens.didChangeLocalLLM")
     static let didChangeLocalVerdict = Notification.Name("QuantLens.didChangeLocalVerdict")
     static let didChangeStrategy = Notification.Name("QuantLens.didChangeStrategy")
     static let didChangeFundamental = Notification.Name("QuantLens.didChangeFundamental")
@@ -87,6 +88,8 @@ final class AppState {
 
     // AI
     var aiConfig = AIConfig.load()
+    /// 本地模型（Ollama）配置：只做信号解释，默认关闭
+    var localLLMConfig = LocalLLMConfig.load()
     private(set) var aiVerdicts: [String: AIVerdict] = [:]
     private(set) var aiStatus: String = ""
     private(set) var isAIReviewing = false
@@ -142,6 +145,7 @@ final class AppState {
     /// 刷新情绪快照：纯内存计算，不新增请求。
     /// 在行情刷新与竞价定榜后调用（见 refreshAll / finalizeAuction）。
     func refreshEmotion() async {
+        await refreshIndexTrend()
         let pool = await AuctionScanner.shared.breadthSnapshot
         let breadth: MarketBreadth
         if let pool, pool.total >= 20 {
@@ -155,6 +159,28 @@ final class AppState {
         emotionSnapshot = snap
         await AuctionScanner.shared.setEmotionPhase(snap.phase)
         notify(Self.didChangeEmotion)
+    }
+
+    // MARK: - 买卖点环境门控
+
+    /// 上证指数趋势（门控输入之一）。每天最多刷新一次，失败时保持未知（门控放行）。
+    private(set) var indexTrend: IndexTrendState = .unknown
+    private var indexTrendDate: Date?
+
+    /// 当前门控输入：指数趋势（缓存）+ 市场宽度（情绪快照）。任一缺失即放行。
+    var tradePointGates: TradePointGates {
+        TradePointGates(indexTrend: indexTrend, breadth: emotionSnapshot?.breadth)
+    }
+
+    /// 刷新指数趋势：拉上证指数日线算 MA20 状态。失败/数据不足时保持未知。
+    func refreshIndexTrend() async {
+        let today = Calendar.current.startOfDay(for: Date())
+        if let d = indexTrendDate, d == today { return }
+        let indexSec = Security(symbol: "sh000001", name: "上证指数", market: .index)
+        let data = await MarketService.shared.load(security: indexSec, period: .day)
+        guard data.candles.count >= 26 else { return }
+        indexTrend = TradePointEngine.indexTrend(from: data.candles)
+        indexTrendDate = today
     }
 
     // MARK: - 本地智能分析（零 Key）
@@ -479,7 +505,7 @@ final class AppState {
             quotes[sec.id] = q
         }
 
-        let a = SignalEngine.analyze(data: result, period: p)
+        let a = SignalEngine.analyze(data: result, period: p, gates: tradePointGates)
         analysis = a
         // K线就绪后立即评估战法
         strategyResult = StrategySignals.evaluate(candles: result.candles)
@@ -1357,6 +1383,12 @@ final class AppState {
         aiConfig = config
         config.save()
         notify(Self.didChangeAI)
+    }
+
+    func saveLocalLLMConfig(_ config: LocalLLMConfig) {
+        localLLMConfig = config
+        config.save()
+        notify(Self.didChangeLocalLLM)
     }
 
     // MARK: - 自动扫描（开盘定时）

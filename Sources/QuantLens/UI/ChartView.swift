@@ -11,6 +11,8 @@ final class ChartView: NSView {
     private var ctx: MarketContext?
     private var markers: [TradingSignal] = []
     private var levels: [PriceLevel] = []
+    private var tradePoints: [TradePointSignal] = []
+    private var fearHistory: [FearSignal] = []
     private var intraday = true
 
     // 视图状态
@@ -58,10 +60,13 @@ final class ChartView: NSView {
 
     // MARK: - 数据注入
 
-    func update(context: MarketContext?, markers: [TradingSignal], levels: [PriceLevel], intraday: Bool) {
+    func update(context: MarketContext?, markers: [TradingSignal], levels: [PriceLevel], intraday: Bool,
+                tradePoints: [TradePointSignal] = [], fearHistory: [FearSignal] = []) {
         self.ctx = context
         self.markers = markers
         self.levels = levels
+        self.tradePoints = tradePoints
+        self.fearHistory = fearHistory
         self.intraday = intraday
         if let c = context {
             visibleBars = min(visibleBars, max(30, c.count))
@@ -283,9 +288,11 @@ final class ChartView: NSView {
             drawSeries(g, values: ctx.ma60, pr: pr, color: Theme.ma60.alpha(0.95), width: 1.0)
         }
 
-        // 信号标记
+        // 信号标记：旧四类评分标记 + 新买卖点 + 恐惧/贪婪历史
         if showMarkers {
             drawMarkers(g, ctx: ctx, pr: pr)
+            drawTradePoints(g, ctx: ctx, pr: pr)
+            drawFearHistory(g, ctx: ctx, pr: pr)
         }
 
         // 最新价
@@ -391,6 +398,105 @@ final class ChartView: NSView {
                 g.drawText(ch, at: CGPoint(x: x, y: isBuySide ? y + size + 1 : y - size - 10),
                            font: Fonts.ui(7, weight: .bold), color: color.alpha(0.9), align: .center)
             }
+        }
+    }
+
+    /// 显式买卖点：买点红色上三角在最低价下方、卖点绿色下三角在最高价上方，
+    /// 旁边带两字形态标签；"强"点三角形稍大，被门控否决的点半透明。
+    private func drawTradePoints(_ g: CGContext, ctx: MarketContext, pr: (lo: Double, hi: Double)) {
+        var byIndex: [Int: [TradePointSignal]] = [:]
+        var dateToIndex: [Date: Int] = [:]
+        for i in barRange { dateToIndex[ctx.candles[i].date] = i }
+        for p in tradePoints {
+            if let idx = dateToIndex[p.date] { byIndex[idx, default: []].append(p) }
+        }
+
+        for (idx, points) in byIndex {
+            let local = idx - barRange.lowerBound
+            guard local >= 0 else { continue }
+            let x = xFor(localIndex: local)
+            let c = ctx.candles[idx]
+            var sorted = points
+            sorted.sort { $0.strength > $1.strength }
+
+            var buySlot = 0
+            var sellSlot = 0
+            for p in sorted.prefix(2) {
+                let isBuy = p.direction == .buy
+                let baseColor = isBuy ? Theme.up : Theme.down
+                let color = p.isVetoed ? baseColor.alpha(0.35) : baseColor.alpha(0.95)
+                let size: CGFloat = p.isStrong ? 5.0 : 4.0
+                var y: CGFloat
+                if isBuy {
+                    y = yFor(price: c.low, range: pr) + 18 + CGFloat(buySlot) * 11
+                    buySlot += 1
+                } else {
+                    y = yFor(price: c.high, range: pr) - 18 - CGFloat(sellSlot) * 11
+                    sellSlot += 1
+                }
+                g.setFillColor(color.cgColor)
+                g.beginPath()
+                if isBuy {
+                    g.move(to: CGPoint(x: x, y: y - size))
+                    g.addLine(to: CGPoint(x: x - size * 0.85, y: y + size * 0.7))
+                    g.addLine(to: CGPoint(x: x + size * 0.85, y: y + size * 0.7))
+                } else {
+                    g.move(to: CGPoint(x: x, y: y + size))
+                    g.addLine(to: CGPoint(x: x - size * 0.85, y: y - size * 0.7))
+                    g.addLine(to: CGPoint(x: x + size * 0.85, y: y - size * 0.7))
+                }
+                g.closePath()
+                g.fillPath()
+
+                let label = p.kind.shortLabel
+                let weight: NSFont.Weight = p.isStrong ? .bold : .semibold
+                g.drawText(label, at: CGPoint(x: x, y: isBuy ? y + size + 1 : y - size - 10),
+                           font: Fonts.ui(7, weight: weight), color: color, align: .center)
+            }
+        }
+    }
+
+    /// 恐惧/贪婪信号历史：小菱形 + 两字标签。恐惧用蓝、贪婪用黄，与信号面板一致。
+    /// 同一根 K 线已有同向买卖点时跳过，避免标记重叠刷屏。
+    private func drawFearHistory(_ g: CGContext, ctx: MarketContext, pr: (lo: Double, hi: Double)) {
+        var dateToIndex: [Date: Int] = [:]
+        for i in barRange { dateToIndex[ctx.candles[i].date] = i }
+        var tradePointKeys = Set<String>()
+        for p in tradePoints {
+            tradePointKeys.insert("\(p.date.timeIntervalSince1970)-\(p.direction.rawValue)")
+        }
+
+        var byIndex: [Int: [FearSignal]] = [:]
+        for f in fearHistory {
+            let key = "\(f.date.timeIntervalSince1970)-\(f.direction.rawValue)"
+            if tradePointKeys.contains(key) { continue }
+            if let idx = dateToIndex[f.date] { byIndex[idx, default: []].append(f) }
+        }
+
+        for (idx, signals) in byIndex {
+            let local = idx - barRange.lowerBound
+            guard local >= 0 else { continue }
+            let x = xFor(localIndex: local)
+            let c = ctx.candles[idx]
+            var sorted = signals
+            sorted.sort { $0.score > $1.score }
+            guard let f = sorted.first else { continue }
+            let isBuy = f.direction == .buy
+            let color = f.sentiment == .fear ? Theme.accumulate.alpha(0.85) : Theme.risk.alpha(0.85)
+            let size: CGFloat = 3.5
+            let y: CGFloat = isBuy
+                ? yFor(price: c.low, range: pr) + 29
+                : yFor(price: c.high, range: pr) - 29
+            g.setFillColor(color.cgColor)
+            g.beginPath()
+            g.move(to: CGPoint(x: x, y: y - size))
+            g.addLine(to: CGPoint(x: x + size, y: y))
+            g.addLine(to: CGPoint(x: x, y: y + size))
+            g.addLine(to: CGPoint(x: x - size, y: y))
+            g.closePath()
+            g.fillPath()
+            g.drawText(f.kind.shortLabel, at: CGPoint(x: x, y: isBuy ? y + size + 1 : y - size - 10),
+                       font: Fonts.ui(7, weight: .semibold), color: color, align: .center)
         }
     }
 

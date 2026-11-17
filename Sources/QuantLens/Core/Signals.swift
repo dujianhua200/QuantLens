@@ -484,7 +484,7 @@ enum SignalEngine {
 
     // MARK: - 汇总分析
 
-    static func analyze(data: StockData, period: KPeriod) -> Analysis {
+    static func analyze(data: StockData, period: KPeriod, gates: TradePointGates = .unknown) -> Analysis {
         let scale = period.isIntraday ? 1.0 : (period == .day ? 1.0 : (period == .week ? 1.6 : 2.2))
         let ctx = MarketContext.build(from: data, extraPeriodScale: period.isIntraday ? 1.0 : scale)
         guard ctx.count >= 40 else {
@@ -561,9 +561,17 @@ enum SignalEngine {
             }
         }
 
+        // 显式买卖点引擎：替换旧标记系统作为图上打点与面板列表的主来源。
+        // 旧 markers 保留计算（扫描/回测仍引用），但图上优先画买卖点。
+        let engineResult = TradePointEngine.evaluateAll(
+            ctx: ctx, from: from, limitUp: data.security.market.limitUp, gates: gates
+        )
+
         let summary = makeSummary(ctx: ctx, eval: eval, signals: signals)
         return Analysis(context: ctx, signals: signals, markers: markers, summary: summary, eval: eval,
-                        fearSignals: fearSignals)
+                        fearSignals: fearSignals,
+                        tradePoints: engineResult.points,
+                        fearHistory: engineResult.fearHistory)
     }
 
     private static func makeSummary(ctx: MarketContext, eval: BarEvaluation, signals: [TradingSignal]) -> String {
@@ -608,6 +616,10 @@ struct Analysis {
     var eval: BarEvaluation
     /// 恐惧/贪婪日线信号（独立于四类信号，供信号面板与机会榜展示）
     var fearSignals: [FearSignal] = []
+    /// 显式买卖点（新引擎，图上打点与面板列表的主来源）
+    var tradePoints: [TradePointSignal] = []
+    /// 逐根恐惧/贪婪信号历史（图上叠加展示用）
+    var fearHistory: [FearSignal] = []
 
     var supports: [PriceLevel] { context.levels.filter { $0.kind == .support } }
     var resistances: [PriceLevel] { context.levels.filter { $0.kind == .resistance } }
