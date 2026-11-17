@@ -33,6 +33,7 @@ final class AppState {
     static let didChangeAuction = Notification.Name("QuantLens.didChangeAuction")
     static let didChangeEmotion = Notification.Name("QuantLens.didChangeEmotion")
     static let didChangeLocalLLM = Notification.Name("QuantLens.didChangeLocalLLM")
+    static let didChangeCloudLLM = Notification.Name("QuantLens.didChangeCloudLLM")
     static let didChangeLocalVerdict = Notification.Name("QuantLens.didChangeLocalVerdict")
     static let didChangeStrategy = Notification.Name("QuantLens.didChangeStrategy")
     static let didChangeFundamental = Notification.Name("QuantLens.didChangeFundamental")
@@ -90,6 +91,8 @@ final class AppState {
     var aiConfig = AIConfig.load()
     /// 本地模型（Ollama）配置：只做信号解释，默认关闭
     var localLLMConfig = LocalLLMConfig.load()
+    /// 云端模型配置：只做信号解释，默认关闭；Key 只存 Keychain
+    var cloudLLMConfig = CloudLLMConfig.load()
     private(set) var aiVerdicts: [String: AIVerdict] = [:]
     private(set) var aiStatus: String = ""
     private(set) var isAIReviewing = false
@@ -1389,6 +1392,12 @@ final class AppState {
         localLLMConfig = config
         config.save()
         notify(Self.didChangeLocalLLM)
+    }
+
+    func saveCloudLLMConfig(_ config: CloudLLMConfig) {
+        cloudLLMConfig = config
+        config.save()
+        notify(Self.didChangeCloudLLM)
     }
 
     // MARK: - 自动扫描（开盘定时）

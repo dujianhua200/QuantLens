@@ -518,6 +518,9 @@ final class SignalDetailPanel: PanelBase {
         // ---- 买卖点（新引擎日线点 + 当日分时触发，同一列表按时间倒序） ----
         addTradePointsSection(analysis: a)
 
+        // ---- 复制分析包（仅复制到剪贴板，不联网、不自动发送） ----
+        addCopyPacketRow(analysis: a)
+
         for sig in a.signals {
             let color = Theme.color(for: sig.kind)
             let icon = NSImageView()
@@ -655,20 +658,22 @@ final class SignalDetailPanel: PanelBase {
         stack.addArrangedSubview(t1Note)
         t1Note.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
-        // 本地模型解读（仅开启时显示；模型不可用或校验失败时回落模板文字）
-        if app.localLLMConfig.isUsable {
-            addLLMExplainRow(analysis: a)
+        // 模型解读（本地/云端任一开启时显示；云端优先，模型不可用或校验失败时回落模板文字）
+        let cloudReady = app.cloudLLMConfig.isUsable && CloudLLMConfig.hasKey()
+        if cloudReady || app.localLLMConfig.isUsable {
+            addExplainRow(analysis: a, useCloud: cloudReady)
         }
     }
 
-    private func addLLMExplainRow(analysis a: Analysis) {
+    private func addExplainRow(analysis a: Analysis, useCloud: Bool) {
         let resultLabel = L.wrapped("", size: 9.5, color: Theme.text.withAlphaComponent(0.75))
         resultLabel.isHidden = true
+        let buttonTitle = useCloud ? "云端模型解读" : "本地模型解读"
         let button = NSButton()
-        button.title = "本地模型解读"
+        button.title = buttonTitle
         button.setButtonType(.momentaryChange)
         button.isBordered = false
-        button.attributedTitle = NSAttributedString(string: "本地模型解读", attributes: [
+        button.attributedTitle = NSAttributedString(string: buttonTitle, attributes: [
             .font: Fonts.ui(9.5), .foregroundColor: Theme.accent
         ])
         button.wantsLayer = true
@@ -684,53 +689,149 @@ final class SignalDetailPanel: PanelBase {
         resultLabel.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
         // 用 target-action 承载异步调用，避免闭包持有已重建的视图
-        let action = LLMExplainAction(button: button, resultLabel: resultLabel, statusLabel: statusLabel,
-                                      points: a.tradePoints)
+        let action = SignalExplainAction(button: button, resultLabel: resultLabel, statusLabel: statusLabel,
+                                         points: a.tradePoints, useCloud: useCloud)
         button.target = action
-        button.action = #selector(LLMExplainAction.run)
+        button.action = #selector(SignalExplainAction.run)
         // action 由按钮的 associated object 持有（见下方扩展）
-        objc_setAssociatedObject(button, &llmActionKey, action, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(button, &explainActionKey, action, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    // MARK: - 复制分析包
+
+    private func addCopyPacketRow(analysis a: Analysis) {
+        guard let input = makePacketInput(analysis: a) else { return }
+        let packetText = AnalysisPacket.build(input)
+        let button = NSButton()
+        button.title = "复制分析包"
+        button.setButtonType(.momentaryChange)
+        button.isBordered = false
+        button.attributedTitle = NSAttributedString(string: "复制分析包", attributes: [
+            .font: Fonts.ui(9.5), .foregroundColor: Theme.accent
+        ])
+        button.wantsLayer = true
+        button.layer?.backgroundColor = Theme.accent.withAlphaComponent(0.13).cgColor
+        button.layer?.cornerRadius = 3
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        let statusLabel = L.label("", size: 8.5, color: Theme.textFaint)
+        let row = L.hstack([button, L.spacer(), statusLabel], spacing: 6)
+        stack.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        let action = CopyPacketAction(button: button, statusLabel: statusLabel, packetText: packetText)
+        button.target = action
+        button.action = #selector(CopyPacketAction.run)
+        objc_setAssociatedObject(button, &copyPacketActionKey, action, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    /// 组装分析包输入：全部取自已算好的数据，不编造数字。
+    private func makePacketInput(analysis a: Analysis) -> AnalysisPacket.Input? {
+        let app = AppState.shared
+        guard let sec = app.selected else { return nil }
+        var intraday: [BuyPointEntry] = []
+        for e in app.buyPointEntries {
+            if e.security.id == sec.id { intraday.append(e) }
+        }
+        return AnalysisPacket.Input(
+            security: sec,
+            quote: app.selectedQuote,
+            lastClose: a.context.closes.last,
+            generatedAt: Date(),
+            summary: a.summary,
+            emotion: app.emotionSnapshot,
+            tradePoints: a.tradePoints,
+            fearSignals: a.fearSignals,
+            supports: a.supports,
+            resistances: a.resistances,
+            intraday: intraday
+        )
     }
 }
 
-// MARK: - 本地模型解读动作（避免闭包持有重建视图）
+// MARK: - 模型解读动作（避免闭包持有重建视图）
 
-private var llmActionKey: UInt8 = 0
+private var explainActionKey: UInt8 = 0
 
-private final class LLMExplainAction: NSObject {
+private final class SignalExplainAction: NSObject {
     private weak var button: NSButton?
     private weak var resultLabel: NSTextField?
     private weak var statusLabel: NSTextField?
     private let points: [TradePointSignal]
+    private let useCloud: Bool
 
-    init(button: NSButton, resultLabel: NSTextField, statusLabel: NSTextField, points: [TradePointSignal]) {
+    init(button: NSButton, resultLabel: NSTextField, statusLabel: NSTextField,
+         points: [TradePointSignal], useCloud: Bool) {
         self.button = button
         self.resultLabel = resultLabel
         self.statusLabel = statusLabel
         self.points = points
+        self.useCloud = useCloud
     }
 
     @objc func run() {
         guard let button, let resultLabel, let statusLabel else { return }
         button.isEnabled = false
-        statusLabel.stringValue = "本地模型解读中…"
+        let sourceName = useCloud ? "云端模型" : "本地模型"
+        statusLabel.stringValue = "\(sourceName)解读中…"
         statusLabel.textColor = Theme.textDim
         let app = AppState.shared
-        let cfg = app.localLLMConfig
         let breadth = app.emotionSnapshot?.breadth
         let points = self.points
+        let useCloud = self.useCloud
         Task { @MainActor in
-            let (text, fromLLM) = await LocalLLMClient.shared.explain(
-                points: points, breadth: breadth, config: cfg
-            )
+            var text = ""
+            var fromLLM = false
+            if useCloud {
+                let cfg = app.cloudLLMConfig
+                let key = CloudLLMConfig.loadKey() ?? ""
+                let result = await CloudLLMClient.shared.explain(
+                    points: points, breadth: breadth, config: cfg, apiKey: key
+                )
+                text = result.text
+                fromLLM = result.fromLLM
+            } else {
+                let cfg = app.localLLMConfig
+                let result = await LocalLLMClient.shared.explain(
+                    points: points, breadth: breadth, config: cfg
+                )
+                text = result.text
+                fromLLM = result.fromLLM
+            }
             // 面板可能已重建：视图脱离层级时不再更新
             guard resultLabel.superview != nil else { return }
             resultLabel.isHidden = false
             resultLabel.stringValue = text
-            statusLabel.stringValue = fromLLM ? "本地模型解读（已校验数字）" : "模板解读（本地模型不可用或校验未通过）"
+            statusLabel.stringValue = fromLLM ? "\(sourceName)解读（已校验数字）" : "模板解读（\(sourceName)不可用或校验未通过）"
             statusLabel.textColor = Theme.textFaint
             button.isEnabled = true
         }
+    }
+}
+
+// MARK: - 复制分析包动作
+
+private var copyPacketActionKey: UInt8 = 0
+
+/// 只复制到系统剪贴板，不联网、不自动发送。用户自己粘贴到聊天里发给 Kit。
+private final class CopyPacketAction: NSObject {
+    private weak var button: NSButton?
+    private weak var statusLabel: NSTextField?
+    private let packetText: String
+
+    init(button: NSButton, statusLabel: NSTextField, packetText: String) {
+        self.button = button
+        self.statusLabel = statusLabel
+        self.packetText = packetText
+    }
+
+    @objc func run() {
+        guard let statusLabel else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(packetText, forType: .string)
+        statusLabel.stringValue = "已复制分析包，去聊天里粘贴发给 Kit"
+        statusLabel.textColor = Theme.buy
     }
 }
 

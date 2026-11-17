@@ -401,6 +401,15 @@ final class AISettingsPanel: PanelBase {
     private let localTestButton = NSButton()
     private let localResultLabel = L.label("", size: 8.5, color: Theme.textFaint)
 
+    private let cloudEnableSwitch = NSSwitch()
+    private let cloudPresetPopup = NSPopUpButton()
+    private let cloudBaseURLField = NSTextField()
+    private let cloudModelField = NSTextField()
+    private let cloudKeyField = NSSecureTextField()
+    private let cloudTestButton = NSButton()
+    private let cloudResultLabel = L.label("", size: 8.5, color: Theme.textFaint)
+    private let cloudKeyStateLabel = L.label("", size: 8.5, color: Theme.textFaint)
+
     init() {
         super.init(title: "AI 接入", icon: "sparkles")
         build()
@@ -516,6 +525,7 @@ final class AISettingsPanel: PanelBase {
         resultLabel.stringValue = AppState.shared.aiStatus.isEmpty ? "" : AppState.shared.aiStatus
 
         buildLocalLLMSection()
+        buildCloudLLMSection()
     }
 
     // MARK: - 本地模型（Ollama）区
@@ -609,6 +619,167 @@ final class AISettingsPanel: PanelBase {
         }
     }
 
+    // MARK: - 云端模型区
+
+    private func buildCloudLLMSection() {
+        let cfg = AppState.shared.cloudLLMConfig
+
+        let divider = L.label("云端模型解释（DeepSeek / 通义）", size: 9, weight: .semibold, color: Theme.textDim)
+        addBody(divider)
+        divider.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+
+        cloudEnableSwitch.state = cfg.enabled ? .on : .off
+        cloudEnableSwitch.controlSize = .small
+        cloudEnableSwitch.target = self
+        cloudEnableSwitch.action = #selector(saveCloudLLM)
+        cloudEnableSwitch.translatesAutoresizingMaskIntoConstraints = false
+        let enableRow = L.hstack([L.label("启用云端解释", size: 9.5, color: Theme.textDim), L.spacer(), cloudEnableSwitch], spacing: 4)
+        addBody(enableRow)
+        enableRow.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+
+        var presetTitles: [String] = []
+        for p in CloudLLMConfig.Preset.allCases { presetTitles.append(p.label) }
+        cloudPresetPopup.addItems(withTitles: presetTitles)
+        cloudPresetPopup.controlSize = .small
+        cloudPresetPopup.font = Fonts.ui(9.5)
+        cloudPresetPopup.target = self
+        cloudPresetPopup.action = #selector(saveCloudLLM)
+        cloudPresetPopup.translatesAutoresizingMaskIntoConstraints = false
+        cloudPresetPopup.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        var presetIndex = 0
+        for (i, p) in CloudLLMConfig.Preset.allCases.enumerated() {
+            if p == cfg.preset { presetIndex = i }
+        }
+        cloudPresetPopup.selectItem(at: presetIndex)
+        let presetRow = L.hstack([L.label("服务商", size: 9.5, color: Theme.textDim), L.spacer(), cloudPresetPopup], spacing: 4)
+        addBody(presetRow)
+        presetRow.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+
+        cloudBaseURLField.placeholderString = "https://api.deepseek.com/v1"
+        cloudBaseURLField.font = Fonts.mono(9.5)
+        cloudBaseURLField.isBordered = true
+        cloudBaseURLField.bezelStyle = .roundedBezel
+        cloudBaseURLField.focusRingType = .none
+        cloudBaseURLField.stringValue = cfg.baseURL
+        cloudBaseURLField.translatesAutoresizingMaskIntoConstraints = false
+        cloudBaseURLField.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        cloudBaseURLField.target = self
+        cloudBaseURLField.action = #selector(saveCloudLLM)
+        addField("接口地址", cloudBaseURLField)
+
+        cloudModelField.placeholderString = "deepseek-chat"
+        cloudModelField.font = Fonts.mono(9.5)
+        cloudModelField.isBordered = true
+        cloudModelField.bezelStyle = .roundedBezel
+        cloudModelField.focusRingType = .none
+        cloudModelField.stringValue = cfg.model
+        cloudModelField.translatesAutoresizingMaskIntoConstraints = false
+        cloudModelField.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        cloudModelField.target = self
+        cloudModelField.action = #selector(saveCloudLLM)
+        addField("模型", cloudModelField)
+
+        cloudKeyField.placeholderString = "API Key（保存后存入系统钥匙串）"
+        cloudKeyField.font = Fonts.mono(9.5)
+        cloudKeyField.isBordered = true
+        cloudKeyField.bezelStyle = .roundedBezel
+        cloudKeyField.focusRingType = .none
+        cloudKeyField.translatesAutoresizingMaskIntoConstraints = false
+        cloudKeyField.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        cloudKeyField.target = self
+        cloudKeyField.action = #selector(saveCloudLLM)
+        addField("API Key", cloudKeyField)
+
+        let keyStateRow = L.hstack([cloudKeyStateLabel, L.spacer()], spacing: 4)
+        addBody(keyStateRow)
+        keyStateRow.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        refreshCloudKeyState()
+
+        cloudTestButton.title = "测试云端连接"
+        cloudTestButton.setButtonType(.momentaryChange)
+        cloudTestButton.isBordered = false
+        cloudTestButton.attributedTitle = NSAttributedString(string: "测试云端连接", attributes: [
+            .font: Fonts.ui(9.5), .foregroundColor: Theme.accent
+        ])
+        cloudTestButton.wantsLayer = true
+        cloudTestButton.layer?.backgroundColor = Theme.accent.withAlphaComponent(0.13).cgColor
+        cloudTestButton.layer?.cornerRadius = 3
+        cloudTestButton.target = self
+        cloudTestButton.action = #selector(testCloudLLM)
+        cloudTestButton.translatesAutoresizingMaskIntoConstraints = false
+        cloudTestButton.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        let cloudTestRow = L.hstack([cloudTestButton, L.spacer(), cloudResultLabel], spacing: 6)
+        addBody(cloudTestRow)
+        cloudTestRow.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+
+        let cloudHint = L.wrapped("云端模型只解释规则算好的信号，不参与决策、不新增信号；与本地模型同一套数字校验，失败时回落模板文字。Key 只存系统钥匙串，界面不回显。信号数据会发给所选服务商，费用自付。本地与云端同时开启时优先用云端。首次保存 Key 时系统可能要求钥匙串访问权限。",
+                                  size: 8, color: Theme.textFaint)
+        cloudHint.preferredMaxLayoutWidth = 270
+        addBody(cloudHint)
+        cloudHint.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+    }
+
+    private func refreshCloudKeyState() {
+        if CloudLLMConfig.hasKey() {
+            cloudKeyStateLabel.stringValue = "Key 已保存到系统钥匙串（重新填写可覆盖）"
+            cloudKeyStateLabel.textColor = Theme.buy
+        } else {
+            cloudKeyStateLabel.stringValue = "未保存 Key"
+            cloudKeyStateLabel.textColor = Theme.textFaint
+        }
+    }
+
+    @objc private func saveCloudLLM() {
+        var cfg = AppState.shared.cloudLLMConfig
+        cfg.enabled = cloudEnableSwitch.state == .on
+        let presets = CloudLLMConfig.Preset.allCases
+        let selIndex = cloudPresetPopup.indexOfSelectedItem
+        var preset = CloudLLMConfig.Preset.custom
+        if selIndex >= 0 && selIndex < presets.count {
+            preset = presets[selIndex]
+        }
+        cfg.preset = preset
+        if preset == .custom {
+            cfg.baseURL = cloudBaseURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            cfg.model = cloudModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            cfg.baseURL = preset.baseURL
+            cfg.model = preset.model
+            cloudBaseURLField.stringValue = cfg.baseURL
+            cloudModelField.stringValue = cfg.model
+        }
+        AppState.shared.saveCloudLLMConfig(cfg)
+        // Key 只进钥匙串：填了就存，存完立即清空输入框，绝不回显
+        let key = cloudKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !key.isEmpty {
+            _ = CloudLLMConfig.saveKey(key)
+            cloudKeyField.stringValue = ""
+        }
+        refreshCloudKeyState()
+    }
+
+    @objc private func testCloudLLM() {
+        saveCloudLLM()
+        let cfg = AppState.shared.cloudLLMConfig
+        guard let key = CloudLLMConfig.loadKey(), !key.isEmpty else {
+            cloudResultLabel.stringValue = "✗ 请先填写并保存 API Key"
+            cloudResultLabel.textColor = Theme.distribute
+            return
+        }
+        guard cfg.isUsable else {
+            cloudResultLabel.stringValue = "✗ 请先启用开关并填写模型名"
+            cloudResultLabel.textColor = Theme.distribute
+            return
+        }
+        cloudResultLabel.stringValue = "测试中…"
+        cloudResultLabel.textColor = Theme.textDim
+        Task { @MainActor in
+            let ok = await CloudLLMClient.shared.checkAvailable(config: cfg, apiKey: key)
+            self.cloudResultLabel.stringValue = ok ? "✓ 云端连通，Key 有效" : "✗ 连通失败（地址、Key 或网络）"
+            self.cloudResultLabel.textColor = ok ? Theme.buy : Theme.distribute
+        }
+    }
+
     deinit {
         NotificationCenter.default.removeObserver(self)
     }
@@ -628,6 +799,17 @@ final class AISettingsPanel: PanelBase {
         localEnableSwitch.state = local.enabled ? .on : .off
         if localBaseURLField.currentEditor() == nil { localBaseURLField.stringValue = local.baseURL }
         if localModelField.currentEditor() == nil { localModelField.stringValue = local.model }
+        let cloud = AppState.shared.cloudLLMConfig
+        cloudEnableSwitch.state = cloud.enabled ? .on : .off
+        var cloudIndex = 0
+        for (i, p) in CloudLLMConfig.Preset.allCases.enumerated() {
+            if p == cloud.preset { cloudIndex = i }
+        }
+        cloudPresetPopup.selectItem(at: cloudIndex)
+        if cloudBaseURLField.currentEditor() == nil { cloudBaseURLField.stringValue = cloud.baseURL }
+        if cloudModelField.currentEditor() == nil { cloudModelField.stringValue = cloud.model }
+        // Key 字段永不回填，只刷新"已保存/未保存"状态
+        refreshCloudKeyState()
     }
 
     @objc private func onAIChanged() {
