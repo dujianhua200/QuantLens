@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    # macos-14：Apple Silicon runner，Xcode 15 / Swift 5.9-5.10，
+    # 与 Package.swift 的 swift-tools-version 5.9 与最低部署目标 macOS 14 一致，
+    # 避免更新的 Xcode 默认 Swift 6 语言模式给旧代码带来新的并发警告噪音。
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Package .app
+        # 注意：push_files 不保留文件 mode，build_app.sh 落盘后无 +x，
+        # 故用 bash 显式执行，不要改回 ./build_app.sh。
+        run: bash build_app.sh
+
+      - name: Upload .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuantLens-macOS
+          path: dist/QuantLens.app
+          retention-days: 7
