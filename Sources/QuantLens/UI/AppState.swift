@@ -1414,7 +1414,8 @@ final class AppState {
     /// 港美股无分时接口，不进入本榜（日线扫描不受影响）。
     func refreshBuyPointBoard() async {
         guard !isBuyPointScanning else { return }
-        let targets = watchlist.map(\.security).filter {
+        let securities: [Security] = watchlist.map(\.security)
+        let targets = securities.filter {
             $0.market == .sh || $0.market == .sz || $0.market == .bj
         }
         guard !targets.isEmpty else {
