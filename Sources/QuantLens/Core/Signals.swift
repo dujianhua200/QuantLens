@@ -495,6 +495,8 @@ enum SignalEngine {
         let last = ctx.lastIndex
         let price = ctx.currentPrice
         let date = ctx.candles[last].date
+        // 恐惧/贪婪日线信号：独立计算，不改动四类信号分数
+        let fearSignals = FearSignals.evaluate(ctx, at: last, limitUp: data.security.market.limitUp)
 
         var signals: [TradingSignal] = []
         for kind in SignalKind.allCases {
@@ -560,7 +562,8 @@ enum SignalEngine {
         }
 
         let summary = makeSummary(ctx: ctx, eval: eval, signals: signals)
-        return Analysis(context: ctx, signals: signals, markers: markers, summary: summary, eval: eval)
+        return Analysis(context: ctx, signals: signals, markers: markers, summary: summary, eval: eval,
+                        fearSignals: fearSignals)
     }
 
     private static func makeSummary(ctx: MarketContext, eval: BarEvaluation, signals: [TradingSignal]) -> String {
@@ -603,6 +606,8 @@ struct Analysis {
     var markers: [TradingSignal]
     var summary: String
     var eval: BarEvaluation
+    /// 恐惧/贪婪日线信号（独立于四类信号，供信号面板与机会榜展示）
+    var fearSignals: [FearSignal] = []
 
     var supports: [PriceLevel] { context.levels.filter { $0.kind == .support } }
     var resistances: [PriceLevel] { context.levels.filter { $0.kind == .resistance } }

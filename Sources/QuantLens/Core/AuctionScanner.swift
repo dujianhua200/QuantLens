@@ -50,6 +50,24 @@ actor AuctionScanner {
         /// 昨日成交量（手），用于估算竞价量比
         var prevVolume: Double
         var prevAmount: Double
+        /// 排行行字段（情绪宽度统计用；字段缺失时为 nil/0，统计时自动降级）
+        var changePct: Double?
+        var trade: Double = 0
+        var high: Double = 0
+        var low: Double = 0
+    }
+
+    // MARK: - 情绪宽度与情绪相位
+
+    /// 候选池宽度快照（由 refreshPoolIfNeeded 在建池时顺手统计，不新增请求）。
+    /// AppState 优先用它算全市场情绪，池子不可用时退回自选快照口径。
+    private var poolBreadth: MarketBreadth?
+    var breadthSnapshot: MarketBreadth? { poolBreadth }
+
+    /// 当前情绪相位（AppState 在情绪刷新后写入，供竞价打分做情绪加成）。
+    private var emotionPhase: EmotionPhase?
+    func setEmotionPhase(_ phase: EmotionPhase?) {
+        emotionPhase = phase
     }
 
     // MARK: - 阶段判定
@@ -121,6 +139,8 @@ actor AuctionScanner {
                     let security = Self.makeSecurity(code: code, name: name)
                     let key = security.tencentCode
                     if picked[key] != nil { continue }
+                    // 宽度字段：changepercent 缺失时记 nil（统计时用现价/昨收推算）
+                    let chg: Double? = row["changepercent"] == nil ? nil : num(row["changepercent"])
                     picked[key] = AuctionMeta(
                         security: security,
                         name: name,
@@ -128,7 +148,11 @@ actor AuctionScanner {
                         floatCap: nmc,
                         industry: "—",
                         prevVolume: num(row["volume"]) / 100,   // 股 -> 手
-                        prevAmount: num(row["amount"])
+                        prevAmount: num(row["amount"]),
+                        changePct: chg,
+                        trade: num(row["trade"]),
+                        high: num(row["high"]),
+                        low: num(row["low"])
                     )
                 }
                 try? await Task.sleep(nanoseconds: 220_000_000)
@@ -161,6 +185,8 @@ actor AuctionScanner {
                         let security = Self.makeSecurity(code: code, name: name)
                         let key = security.tencentCode
                         if picked[key] != nil { continue }
+                        // 东财字段：f2 现价 / f3 涨跌幅 / f15 最高 / f16 最低
+                        let chg: Double? = row["f3"] == nil ? nil : num(row["f3"])
                         picked[key] = AuctionMeta(
                             security: security,
                             name: name,
@@ -168,7 +194,11 @@ actor AuctionScanner {
                             floatCap: cap,
                             industry: (row["f100"] as? String) ?? "—",
                             prevVolume: num(row["f5"]),
-                            prevAmount: num(row["f6"])
+                            prevAmount: num(row["f6"]),
+                            changePct: chg,
+                            trade: num(row["f2"]),
+                            high: num(row["f15"]),
+                            low: num(row["f16"])
                         )
                     }
                     try? await Task.sleep(nanoseconds: 250_000_000)
@@ -188,6 +218,23 @@ actor AuctionScanner {
         candidates = limited.map(\.key)
         meta = Dictionary(uniqueKeysWithValues: limited.map { ($0.key, $0.value) })
         lastPoolRefresh = Date()
+
+        // 顺手统计候选池宽度（不新增请求）：供情绪引擎做全市场情绪评估。
+        // 注意：池子是“四维前列”截断的，非全市场随机样本，情绪标签会注明来源。
+        var rows: [EmotionEngine.PoolRow] = []
+        for item in limited {
+            let m = item.value
+            rows.append(EmotionEngine.PoolRow(
+                code: m.security.symbol,
+                market: m.security.market,
+                changePct: m.changePct,
+                trade: m.trade,
+                settlement: m.prevClose,
+                high: m.high,
+                low: m.low
+            ))
+        }
+        poolBreadth = EmotionEngine.breadth(rows: rows)
     }
 
     /// 东财不可用时的兜底候选池：沪深高流动性主流标的。
@@ -240,6 +287,8 @@ actor AuctionScanner {
         candidates = picked.keys.sorted()
         meta = picked
         lastPoolRefresh = Date()
+        // 兜底池无排行字段，不提供宽度数据，情绪引擎退回自选快照口径
+        poolBreadth = nil
     }
 
     nonisolated static func makeSecurity(code: String, name: String) -> Security {
@@ -301,6 +350,18 @@ actor AuctionScanner {
                 }
                 guard matchPrice > 0, prevClose > 0 else { continue }
 
+                // 委买比：同一响应的五档字段（买量 f[10,12,14,16,18]，卖量 f[20,22,24,26,28]）
+                var bidVol = 0.0
+                var askVol = 0.0
+                if f.count > 28 {
+                    for k in 0..<5 {
+                        bidVol += num2(f[10 + k * 2])
+                        askVol += num2(f[20 + k * 2])
+                    }
+                }
+                let bidAskTotal = bidVol + askVol
+                let bidAskRatio = bidAskTotal > 0 ? (bidVol - askVol) / bidAskTotal * 100 : 0
+
                 let gap = (matchPrice - prevClose) / prevClose * 100
                 let prevAmt = lastAmount[key] ?? 0
                 let delta = max(0, volume - prevAmt)
@@ -311,7 +372,8 @@ actor AuctionScanner {
                     gapPct: gap,
                     volume: volume,
                     amount: amount,
-                    volumeDelta: delta
+                    volumeDelta: delta,
+                    bidAskRatio: bidAskRatio
                 )
                 samples[key, default: []].append(s)
                 lastAmount[key] = volume
@@ -326,7 +388,9 @@ actor AuctionScanner {
     // MARK: - 评分
 
     /// 生成选股结果。以 9:20 锁定后的采样为准。
-    func evaluate() -> [AuctionPick] {
+    /// - Parameter includeLowOpen: 为 true 时放宽到 -3% 低开，纳入“恐慌修复”候选
+    ///   （最终是否保留由 `enrichWithHistory` 按昨日历史复核决定）；默认只看高开。
+    func evaluate(includeLowOpen: Bool = false) -> [AuctionPick] {
         var picks: [AuctionPick] = []
 
         for (key, list) in samples {
@@ -338,8 +402,9 @@ actor AuctionScanner {
             guard prevClose > 0 else { continue }
             let gap = latest.gapPct
 
-            // 过滤：必须高开（低开/平开不是「开盘上涨」目标）
-            guard gap >= 0.5 else { continue }
+            // 过滤：默认必须高开；放宽模式纳入 -3% 以内的低开（恐慌修复候选）
+            let minGap = includeLowOpen ? -3.0 : 0.5
+            guard gap >= minGap else { continue }
 
             // 锁定期采样（09:20 后）
             let lockedSamples = list.filter {
@@ -486,6 +551,27 @@ actor AuctionScanner {
                 risks.append("高开微幅且无量，缺乏动能")
             }
 
+            // ⑦ 新增调整项（甜点区 / 兑现风险 / 委买比 / 情绪周期，均有界，不改原有口径）
+            let sweetBonus = AuctionScoring.sweetSpotBonus(gap: gap)
+            score += sweetBonus
+            if sweetBonus >= 4 {
+                reasons.append("高开处于 0.5%~3% 甜点区")
+            }
+            let cashPenalty = AuctionScoring.cashOutPenalty(gap: gap, volRatio: volRatio)
+            score += cashPenalty
+            if cashPenalty < 0 {
+                risks.append("高开超 5% 但量比不足，兑现风险偏高")
+            }
+            let baBonus = AuctionScoring.bidAskBonus(ratio: latest.bidAskRatio)
+            score += baBonus
+            if baBonus > 0 {
+                reasons.append("委买比高，买盘踊跃")
+            } else if baBonus < 0 {
+                risks.append("委买比为负，卖压偏重")
+            }
+            let emoBonus = AuctionScoring.emotionBonus(phase: emotionPhase)
+            score += emoBonus
+
             score = min(100, max(0, score))
 
             let grade: String
@@ -503,6 +589,10 @@ actor AuctionScanner {
                 gap: gap, stability: stability, volRatio: volRatio,
                 turnover: turnover, amount: latest.amount,
                 floatCap: m.floatCap, score: score
+            )
+
+            let auctionClass = AuctionScoring.classify(
+                gap: gap, stability: stability, volRatio: volRatio, panicRepair: false
             )
 
             picks.append(AuctionPick(
@@ -523,13 +613,124 @@ actor AuctionScanner {
                 grade: grade,
                 surgeProbability: surge,
                 surgeLabel: surgeLabel,
-                reasons: Array(reasons.prefix(4)),
-                risks: Array(risks.prefix(3))
+                reasons: Array(reasons.prefix(5)),
+                risks: Array(risks.prefix(4)),
+                auctionClass: auctionClass,
+                bidAskRatio: latest.bidAskRatio
             ))
         }
 
         picks.sort { $0.score > $1.score }
         return picks
+    }
+
+    // MARK: - 历史基因复核
+
+    /// 昨日基因缓存：标的 id -> (基因, 交易日)。同一交易日内复用，
+    /// 避免 finalizeAuction 每次 tick 都重复拉 K 线。
+    private var geneCache: [String: (gene: AuctionGene, day: String)] = [:]
+
+    private func tradeDayString() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
+    }
+
+    /// 对评分前 25 名做昨日历史复核（复用已有日 K 接口，不新增端点）：
+    /// 昨日涨停/连板基因加分；低开候选按“恐慌修复”标准认定保留或剔除。
+    /// 失败或数据不足时保留原 pick（historyKnown 为 false），不阻塞榜单。
+    func enrichWithHistory(_ picks: [AuctionPick]) async -> [AuctionPick] {
+        guard !picks.isEmpty else { return [] }
+        let day = tradeDayString()
+
+        var out: [AuctionPick] = []
+        var needFetch: [AuctionPick] = []
+        for pick in picks.prefix(25) {
+            if let cached = geneCache[pick.security.id], cached.day == day {
+                var p = pick
+                Self.applyGene(&p, gene: cached.gene)
+                out.append(p)
+            } else {
+                needFetch.append(pick)
+            }
+        }
+        // 25 名外不复核，原样保留（低开的在最后一步过滤）
+        let rest = Array(picks.dropFirst(25))
+
+        // 分批拉 K 线，沿用扫描的限流约束（每批 3 只、间隔 180ms）
+        var idx = 0
+        while idx < needFetch.count {
+            let end = min(idx + 3, needFetch.count)
+            let batch = Array(needFetch[idx..<end])
+            // 并发拉取只碰 TencentAPI（不碰 actor 状态），结果串行应用
+            let fetched = await withTaskGroup(of: (Int, [Candle]).self) { group in
+                for (offset, pick) in batch.enumerated() {
+                    group.addTask {
+                        let candles = (try? await TencentAPI.shared.candles(
+                            for: pick.security, period: .day, count: 40)) ?? []
+                        return (offset, candles)
+                    }
+                }
+                var results: [(Int, [Candle])] = []
+                for await r in group {
+                    results.append(r)
+                }
+                return results
+            }
+            for (offset, candles) in fetched {
+                var p = batch[offset]
+                if candles.count >= 3 {
+                    let limit = EmotionEngine.limitPct(for: p.security.symbol, market: p.security.market)
+                    let gene = AuctionScoring.gene(from: candles, limitUp: limit)
+                    geneCache[p.security.id] = (gene: gene, day: day)
+                    Self.applyGene(&p, gene: gene)
+                }
+                out.append(p)
+            }
+            idx = end
+            if idx < needFetch.count {
+                try? await Task.sleep(nanoseconds: 180_000_000)
+            }
+        }
+        out.append(contentsOf: rest)
+
+        // 过滤：低开且未被认定为恐慌修复的一律剔除（无历史证据支撑）
+        var kept: [AuctionPick] = []
+        for p in out {
+            if p.gapPct < 0.5 && p.auctionClass != .panicRepair { continue }
+            kept.append(p)
+        }
+        kept.sort { $0.score > $1.score }
+        return kept
+    }
+
+    /// 把基因应用到 pick：填字段、加分、认定恐慌修复。
+    private static func applyGene(_ pick: inout AuctionPick, gene: AuctionGene) {
+        pick.prevLimitUp = gene.prevLimitUp
+        pick.boardStreak = gene.boardStreak
+        pick.prevDayChangePct = gene.prevDayChangePct
+        pick.prevCloseStrength = gene.prevCloseStrength
+        pick.historyKnown = true
+        let bonus = AuctionScoring.geneBonus(
+            prevLimitUp: gene.prevLimitUp,
+            boardStreak: gene.boardStreak,
+            prevCloseStrength: gene.prevCloseStrength
+        )
+        pick.score = min(100, pick.score + bonus.points)
+        for r in bonus.reasons {
+            pick.reasons.append(r)
+        }
+        let repair = AuctionScoring.isPanicRepair(
+            gap: pick.gapPct, stability: pick.stability, volRatio: pick.volumeRatio,
+            prevDayChangePct: gene.prevDayChangePct
+        )
+        if repair {
+            pick.auctionClass = .panicRepair
+            pick.score = min(100, pick.score + 10)
+            pick.reasons.append("昨日恐慌杀跌 \(Fmt.pct(gene.prevDayChangePct, decimals: 1)) 后今日低开收回，恐慌修复观察")
+        }
     }
 
     /// 估算「开盘后涨幅突破 3%」的概率。

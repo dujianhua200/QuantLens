@@ -37,6 +37,9 @@ struct ScanResult: Identifiable, Hashable {
     /// 显性买卖点记录（由本次分析的信号标记转译，见 TradePoint）
     var tradePoints: [TradePoint] = []
 
+    /// 恐惧/贪婪日线信号（来自本次分析，供机会榜“日线”筛选展示）
+    var fearSignals: [FearSignal] = []
+
     /// 一句话结论
     var verdict: String
 
@@ -292,6 +295,7 @@ enum ScanEngine {
             riskReward: riskReward,
             entryZone: (entryLow, entryHigh),
             tradePoints: TradePoint.dailyPoints(from: analysis),
+            fearSignals: analysis.fearSignals,
             verdict: verdict,
             grade: grade
         )

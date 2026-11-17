@@ -237,13 +237,38 @@ final class AuctionBoardRow: NSView {
             ? String(format: "%.2f%%", pick.turnover)
             : "—"
 
-        layer?.backgroundColor = pick.grade == "重点"
-            ? Theme.up.withAlphaComponent(0.09).cgColor
-            : NSColor.clear.cgColor
+        // 分类底色：恐慌修复蓝、兑现风险黄、重点红，其余无底色
+        if pick.auctionClass == .panicRepair {
+            layer?.backgroundColor = Theme.accent.withAlphaComponent(0.10).cgColor
+        } else if pick.auctionClass == .cashOutRisk {
+            layer?.backgroundColor = Theme.risk.withAlphaComponent(0.10).cgColor
+        } else if pick.grade == "重点" {
+            layer?.backgroundColor = Theme.up.withAlphaComponent(0.09).cgColor
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+        }
 
-        toolTip = String(format: "%@ %@ · %@ · 竞价额 %.2f亿 · 流通 %.0f亿 · 稳定性 %.2f · 评分 %.0f",
+        var tip = String(format: "%@ %@ · %@ · %@ · 竞价额 %.2f亿 · 流通 %.0f亿 · 稳定性 %.2f · 评分 %.0f",
                          pick.name, pick.security.displayCode, pick.industry,
+                         pick.auctionClass.rawValue,
                          pick.amountInYi, pick.floatCap, pick.stability, pick.score)
+        if pick.bidAskRatio != 0 {
+            tip += String(format: " · 委买比 %+.0f%%", pick.bidAskRatio)
+        }
+        if pick.historyKnown {
+            if pick.prevLimitUp {
+                tip += " · 昨日涨停"
+                if pick.boardStreak >= 2 {
+                    tip += "（\(pick.boardStreak) 连板）"
+                }
+            } else {
+                tip += String(format: " · 昨日 %+.1f%%", pick.prevDayChangePct)
+            }
+        }
+        if let first = pick.reasons.first {
+            tip += " · " + first
+        }
+        toolTip = tip
         needsDisplay = true
     }
 

@@ -51,6 +51,11 @@ enum IntradayTriggerKind: String, Hashable, CaseIterable {
     case belowAverageWeak  // 均价线下弱势
     case stalledHigh       // 高位放量滞涨
     case breakdownLow      // 放量跌破日内低点
+    case panicVReversal    // 恐慌杀跌后 V 型反转
+    case secondDipHigher   // 二次回踩确认（踩点抬高）
+    case avgLineBreakout   // 均价线上横盘突破
+    case volumePriceAccel  // 量价齐升加速
+    case lateRush          // 尾盘抢筹
 
     var label: String {
         switch self {
@@ -60,6 +65,11 @@ enum IntradayTriggerKind: String, Hashable, CaseIterable {
         case .belowAverageWeak: return "均线下弱势"
         case .stalledHigh: return "高位滞涨"
         case .breakdownLow: return "跌破新低"
+        case .panicVReversal: return "V型反转"
+        case .secondDipHigher: return "二次回踩"
+        case .avgLineBreakout: return "横盘突破"
+        case .volumePriceAccel: return "量价加速"
+        case .lateRush: return "尾盘抢筹"
         }
     }
 
@@ -67,6 +77,18 @@ enum IntradayTriggerKind: String, Hashable, CaseIterable {
         switch self {
         case .dipToAverage, .breakoutHigh, .volumeSurge: return .buy
         case .belowAverageWeak, .stalledHigh, .breakdownLow: return .sell
+        case .panicVReversal, .secondDipHigher, .avgLineBreakout, .volumePriceAccel, .lateRush: return .buy
+        }
+    }
+
+    /// 触发背后的主导心理（与 FearSignals 的 SentimentTag 同口径）。
+    var sentiment: SentimentTag {
+        switch self {
+        case .dipToAverage, .belowAverageWeak, .breakdownLow: return .fear
+        case .panicVReversal, .secondDipHigher: return .fear
+        case .breakoutHigh, .volumeSurge, .stalledHigh: return .greed
+        case .volumePriceAccel, .lateRush: return .greed
+        case .avgLineBreakout: return .neutral
         }
     }
 }
@@ -82,6 +104,9 @@ struct IntradayTrigger: Hashable {
     /// 触发强度 0~100，仅用于榜单内排序，不代表概率
     var strength: Double
     var reason: String
+
+    /// 情绪标签（由触发类型决定，与日线恐惧/贪婪信号同口径）
+    var sentiment: SentimentTag { kind.sentiment }
 }
 
 // MARK: - 分时信号引擎
@@ -225,6 +250,221 @@ enum IntradaySignals {
                     strength: 68,
                     reason: "放量 \(Fmt.price(vol5)) 倍跌破日内低点 \(Fmt.price(prevLow))，现价 \(Fmt.price(last.price))"
                 ))
+            }
+        }
+
+        // ── 买 4：恐慌杀跌 V 反 ──
+        // 过去 6 分钟内急跌超 1.5% 后快速收回均价线上方，且相对低点回升超 0.8%。
+        // 杀跌段缩量说明恐慌抛盘衰竭，加分。
+        if pts.count >= 15 {
+            let startIdx = lastIdx - 5
+            let startPrice = pts[startIdx].price
+            var minPrice = startPrice
+            var minIdx = startIdx
+            for i in startIdx...lastIdx {
+                let p = pts[i].price
+                if p < minPrice {
+                    minPrice = p
+                    minIdx = i
+                }
+            }
+            let dropPct = startPrice > 0 ? (minPrice / startPrice - 1) * 100 : 0
+            let recoveredAboveAvg = last.price >= last.avgPrice
+            let bounced = last.price > minPrice * 1.008
+            if dropPct <= -1.5, minIdx < lastIdx, recoveredAboveAvg, bounced {
+                var dropVolSum = 0.0
+                var dropCount = 0
+                for i in (startIdx + 1)...minIdx {
+                    dropVolSum += pts[i].volume
+                    dropCount += 1
+                }
+                let dropAvg = dropCount > 0 ? dropVolSum / Double(dropCount) : 0
+                let contracted = avgVol > 0 && dropAvg < avgVol * 0.9
+                var strength = 70.0
+                if contracted { strength += 8 }
+                var reason = "5 分钟急跌 \(Fmt.pct(dropPct, decimals: 1)) 后快速收回均价线，"
+                    + "恐慌杀跌衰竭、V 型反转"
+                if contracted { reason += "，杀跌段缩量" }
+                out.append(IntradayTrigger(
+                    kind: .panicVReversal, direction: .buy,
+                    price: last.price, time: last.time, index: lastIdx,
+                    strength: strength, reason: reason
+                ))
+            }
+        }
+
+        // ── 买 5：二次回踩确认 ──
+        // 过去 25 分钟内出现两次独立的“跌破均价后收回”过程（两次之间至少 3 分钟
+        // 收在均价线上方才算独立），且第二次踩点高于第一次：恐慌抛压一次比一次弱。
+        if pts.count >= 25 {
+            let windowStart = lastIdx - 24
+            // 先标出每分钟是否在均价线下方
+            var below: [Bool] = []
+            for i in windowStart...lastIdx {
+                let p = pts[i]
+                below.append(p.avgPrice > 0 && p.price < p.avgPrice)
+            }
+            // 找“跌破—收回”片段：下方连续段 + 其后至少 3 分钟在上方
+            struct DipEpisode {
+                var low: Double
+                var lowVolume: Double
+            }
+            var episodes: [DipEpisode] = []
+            var i = 0
+            while i < below.count {
+                if !below[i] {
+                    i += 1
+                    continue
+                }
+                // 一段连续的下方分钟
+                var segLow = Double.greatestFiniteMagnitude
+                var segLowVol = 0.0
+                var j = i
+                while j < below.count, below[j] {
+                    let p = pts[windowStart + j]
+                    if p.price < segLow {
+                        segLow = p.price
+                        segLowVol = p.volume
+                    }
+                    j += 1
+                }
+                // 其后上方分钟数
+                var aboveCount = 0
+                var k = j
+                while k < below.count, !below[k] {
+                    aboveCount += 1
+                    k += 1
+                }
+                if aboveCount >= 3 {
+                    episodes.append(DipEpisode(low: segLow, lowVolume: segLowVol))
+                }
+                i = j
+            }
+            if episodes.count >= 2 {
+                let first = episodes[episodes.count - 2]
+                let second = episodes[episodes.count - 1]
+                let higher = second.low > first.low * 1.001
+                let aboveNow = last.price >= last.avgPrice
+                if higher, aboveNow {
+                    var strength = 68.0
+                    if second.lowVolume < first.lowVolume { strength += 6 }
+                    let reason = "二次回踩均价线，踩点由 \(Fmt.price(first.low)) 抬高至 \(Fmt.price(second.low))，"
+                        + "恐慌抛压一次比一次弱"
+                    out.append(IntradayTrigger(
+                        kind: .secondDipHigher, direction: .buy,
+                        price: last.price, time: last.time, index: lastIdx,
+                        strength: strength, reason: reason
+                    ))
+                }
+            }
+        }
+
+        // ── 买 6：均价线上横盘突破 ──
+        // 近 15 分钟内有 ≥10 分钟在均价线 ±0.3% 内横盘（横盘段结束于最近 6 分钟内），
+        // 随后现价站上均价线 +0.2%~+1.0% 且近 5 分钟量比 ≥1.3。
+        // 已大幅拉升（>1%）的不算，避免与“突破新高”重复。
+        if pts.count >= 15 {
+            let windowStart = max(0, lastIdx - 14)
+            var hoverEnd: Int? = nil
+            var h = windowStart + 9
+            while h <= lastIdx {
+                var allHover = true
+                for x in (h - 9)...h {
+                    let p = pts[x]
+                    if p.avgPrice <= 0 {
+                        allHover = false
+                        break
+                    }
+                    let dev = abs(p.price - p.avgPrice) / p.avgPrice
+                    if dev > 0.003 {
+                        allHover = false
+                        break
+                    }
+                }
+                if allHover { hoverEnd = h }
+                h += 1
+            }
+            if let he = hoverEnd, he >= lastIdx - 6 {
+                let aboveAvg = last.avgPrice > 0 && last.price > last.avgPrice * 1.002
+                let notRunaway = last.avgPrice > 0 && last.price <= last.avgPrice * 1.01
+                if aboveAvg, notRunaway, vol5 >= 1.3 {
+                    let reason = "均价线附近横盘 10 分钟后放量突破，现价站上均价线，"
+                        + "多空分歧后选择向上"
+                    out.append(IntradayTrigger(
+                        kind: .avgLineBreakout, direction: .buy,
+                        price: last.price, time: last.time, index: lastIdx,
+                        strength: 66, reason: reason
+                    ))
+                }
+            }
+        }
+
+        // ── 买 7：量价齐升加速 ──
+        // 近 10 分钟价格持续抬升（涨幅 ≥0.8%，后 5 分钟高点高于前 5 分钟高点），
+        // 且量能两级加速：前 5 分钟均量已高于全天均量 1.2 倍，后 5 分钟均量再高于
+        // 前 5 分钟 1.3 倍；现价未创新高（区别于“突破新高”与“放量上攻”的突然放量）。
+        if pts.count >= 20 {
+            let firstStart = lastIdx - 9
+            let secondStart = lastIdx - 4
+            var firstVolSum = 0.0
+            var firstHigh = 0.0
+            for x in firstStart...(secondStart - 1) {
+                firstVolSum += pts[x].volume
+                if pts[x].price > firstHigh { firstHigh = pts[x].price }
+            }
+            var secondVolSum = 0.0
+            var secondHigh = 0.0
+            for x in secondStart...lastIdx {
+                secondVolSum += pts[x].volume
+                if pts[x].price > secondHigh { secondHigh = pts[x].price }
+            }
+            let firstAvg = firstVolSum / 5
+            let secondAvg = secondVolSum / 5
+            let basePrice = pts[firstStart].price
+            let gain10 = basePrice > 0 ? (last.price / basePrice - 1) * 100 : 0
+            var prevHigh = 0.0
+            for x in 0..<lastIdx {
+                if pts[x].price > prevHigh { prevHigh = pts[x].price }
+            }
+            let notNewHigh = prevHigh <= 0 || last.price <= prevHigh * 1.001
+            let warmFirst = avgVol > 0 && firstAvg >= avgVol * 1.2
+            let accelerating = firstAvg > 0 && secondAvg >= firstAvg * 1.3
+            if gain10 >= 0.8, secondHigh > firstHigh, warmFirst, accelerating, notNewHigh {
+                let reason = "近 10 分钟量价齐升：涨幅 \(Fmt.pct(gain10, decimals: 1))，"
+                    + "量能持续加温，买盘层层递进"
+                out.append(IntradayTrigger(
+                    kind: .volumePriceAccel, direction: .buy,
+                    price: last.price, time: last.time, index: lastIdx,
+                    strength: 68, reason: reason
+                ))
+            }
+        }
+
+        // ── 买 8：尾盘抢筹 ──
+        // 14:45 之后：10 分钟上涨 ≥0.6%，近 5 分钟量比 ≥1.8，现价处日内 80% 高分位。
+        // 理由中注明追高风险：尾盘抢筹多为隔夜博弈，次日兑现压力大。
+        if pts.count >= 15 {
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+            let comp = cal.dateComponents([.hour, .minute], from: last.time)
+            let hh = comp.hour ?? 0
+            let mm = comp.minute ?? 0
+            let mins = hh * 60 + mm
+            let isLate = mins >= 14 * 60 + 45 && mins < 15 * 60
+            if isLate, let chg = changeVs(minutesAgo: 10), chg >= 0.6, vol5 >= 1.8 {
+                var dayPos = 0.0
+                if intraday.dayHigh > intraday.dayLow {
+                    dayPos = (last.price - intraday.dayLow) / (intraday.dayHigh - intraday.dayLow)
+                }
+                if dayPos > 0.8 {
+                    let reason = "尾盘 10 分钟上涨 \(Fmt.pct(chg, decimals: 1)) 且放量 \(Fmt.price(vol5)) 倍，"
+                        + "资金抢筹明显；注意：尾盘追高次日兑现压力大，风险偏高"
+                    out.append(IntradayTrigger(
+                        kind: .lateRush, direction: .buy,
+                        price: last.price, time: last.time, index: lastIdx,
+                        strength: 64, reason: reason
+                    ))
+                }
             }
         }
 

@@ -502,7 +502,7 @@ final class SignalDetailPanel: PanelBase {
             v.removeFromSuperview()
         }
 
-        guard let a = AppState.shared.analysis, !a.signals.isEmpty else {
+        guard let a = AppState.shared.analysis, (!a.signals.isEmpty || !a.fearSignals.isEmpty) else {
             let icon = NSImageView()
             icon.image = NSImage(systemSymbolName: "checkmark.seal", accessibilityDescription: nil)
             icon.contentTintColor = Theme.textFaint
@@ -552,6 +552,40 @@ final class SignalDetailPanel: PanelBase {
 
             stack.addArrangedSubview(col)
             col.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        // ---- 情绪信号（恐惧/贪婪日线信号，独立于四类信号） ----
+        if !a.fearSignals.isEmpty {
+            let sectionTitle = L.label("情绪信号 · 恐惧 / 贪婪", size: 9, weight: .semibold, color: Theme.textDim)
+            stack.addArrangedSubview(sectionTitle)
+            sectionTitle.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+            for fs in a.fearSignals {
+                let color: NSColor = fs.sentiment == .fear ? Theme.accumulate : Theme.risk
+                let name = L.label(fs.kind.label, size: 10, weight: .semibold, color: color)
+                let tag = L.label(fs.sentiment.rawValue, size: 8, color: color.withAlphaComponent(0.85))
+                let score = L.label(String(format: "%.0f", fs.score), size: 10, weight: .bold, color: color, mono: true)
+                score.alignment = .right
+                let head = L.hstack([name, tag, L.spacer(), score], spacing: 5)
+
+                let dot = NSView()
+                dot.wantsLayer = true
+                dot.layer?.backgroundColor = color.withAlphaComponent(0.55).cgColor
+                dot.translatesAutoresizingMaskIntoConstraints = false
+                dot.layer?.cornerRadius = 1.5
+                dot.widthAnchor.constraint(equalToConstant: 3).isActive = true
+                dot.heightAnchor.constraint(equalToConstant: 3).isActive = true
+                let text = L.wrapped(fs.reason, size: 9.5, color: Theme.text.withAlphaComponent(0.70))
+                let row = L.hstack([dot, text], spacing: 5, alignment: .top)
+                row.alignment = .top
+                text.widthAnchor.constraint(lessThanOrEqualToConstant: 250).isActive = true
+
+                let col = L.vstack([head, row], spacing: 4)
+                col.translatesAutoresizingMaskIntoConstraints = false
+                head.widthAnchor.constraint(equalTo: col.widthAnchor).isActive = true
+                stack.addArrangedSubview(col)
+                col.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            }
         }
     }
 }

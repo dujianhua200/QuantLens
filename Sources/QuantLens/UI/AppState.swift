@@ -31,6 +31,7 @@ final class AppState {
     static let didChangeTrades = Notification.Name("QuantLens.didChangeTrades")
     static let didChangeLargeOrderScan = Notification.Name("QuantLens.didChangeLargeOrderScan")
     static let didChangeAuction = Notification.Name("QuantLens.didChangeAuction")
+    static let didChangeEmotion = Notification.Name("QuantLens.didChangeEmotion")
     static let didChangeLocalVerdict = Notification.Name("QuantLens.didChangeLocalVerdict")
     static let didChangeStrategy = Notification.Name("QuantLens.didChangeStrategy")
     static let didChangeFundamental = Notification.Name("QuantLens.didChangeFundamental")
@@ -130,6 +131,31 @@ final class AppState {
     private(set) var auctionState = AuctionRunState()
     /// 竞价扫描是否开启（用户开关，默认开启）
     var auctionAutoEnabled = true
+
+    // MARK: - 市场情绪
+
+    /// 当前市场情绪快照（恐惧/贪婪量化 + 周期相位）。
+    /// 数据优先用竞价池宽度（样本数百只），池子不可用时退回自选快照口径，
+    /// 来源见 `snapshot.breadth.sourceLabel`。
+    private(set) var emotionSnapshot: EmotionSnapshot?
+
+    /// 刷新情绪快照：纯内存计算，不新增请求。
+    /// 在行情刷新与竞价定榜后调用（见 refreshAll / finalizeAuction）。
+    func refreshEmotion() async {
+        let pool = await AuctionScanner.shared.breadthSnapshot
+        let breadth: MarketBreadth
+        if let pool, pool.total >= 20 {
+            breadth = pool
+        } else {
+            let qs = Array(quotes.values)
+            breadth = EmotionEngine.breadth(from: qs)
+        }
+        guard breadth.total > 0 else { return }
+        let snap = EmotionEngine.snapshot(breadth: breadth)
+        emotionSnapshot = snap
+        await AuctionScanner.shared.setEmotionPhase(snap.phase)
+        notify(Self.didChangeEmotion)
+    }
 
     // MARK: - 本地智能分析（零 Key）
 
@@ -261,6 +287,7 @@ final class AppState {
         lastUpdate = Date()
         notifyQuotes()
         notify(Self.didChangeWatchlist)
+        await refreshEmotion()
     }
 
     /// 从当前查看的标的加入自选
@@ -409,6 +436,7 @@ final class AppState {
             }
             lastUpdate = Date()
             notifyQuotes()
+            await refreshEmotion()
         } else if !silent {
             errorMessage = "行情获取失败，请检查网络"
             notifyStatus()
@@ -751,13 +779,16 @@ final class AppState {
         }
     }
 
-    /// 09:25 出最终结果
+    /// 09:25 出最终结果：放宽低开候选 + 昨日历史复核（基因加分 / 恐慌修复认定）
     private func finalizeAuction() async {
-        let picks = await AuctionScanner.shared.evaluate()
+        let raw = await AuctionScanner.shared.evaluate(includeLowOpen: true)
+        let picks = await AuctionScanner.shared.enrichWithHistory(raw)
         auctionState.picks = picks
         auctionState.lastSampleAt = Date()
         auctionState.phase = AuctionScanner.phase()
         notify(Self.didChangeAuction)
+        // 池子宽度已就绪，顺手刷新情绪（样本比自选大得多）
+        await refreshEmotion()
     }
 
     /// 手动触发一次竞价扫描（用户点按钮用，非交易时段也能看候选池）
@@ -766,7 +797,8 @@ final class AppState {
         notify(Self.didChangeAuction)
         let n = await AuctionScanner.shared.sampleOnce(forcePool: true)
         let cand = await AuctionScanner.shared.candidateCount
-        let picks = await AuctionScanner.shared.evaluate()
+        let raw = await AuctionScanner.shared.evaluate(includeLowOpen: true)
+        let picks = await AuctionScanner.shared.enrichWithHistory(raw)
         auctionState.candidates = cand
         auctionState.scanned = await AuctionScanner.shared.sampleCodeCount
         auctionState.lastSampleAt = Date()

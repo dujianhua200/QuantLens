@@ -37,6 +37,17 @@ struct AuctionSample: Hashable {
     var amount: Double
     /// 该阶段内量能增量（手）——用于判断竞价过程中是否持续放量
     var volumeDelta: Double
+    /// 委买比 % = (买量 - 卖量) / (买量 + 卖量) × 100，取自同一行情响应的五档字段；
+    /// 盘口字段缺失时为 0（不参与加分）
+    var bidAskRatio: Double = 0
+}
+
+/// 竞价分类：按缺口位置与历史基因划分的观察类别，不是操作建议。
+enum AuctionClass: String, Hashable {
+    case normal = "常规"
+    case sweetSpot = "甜点"
+    case cashOutRisk = "兑现风险"
+    case panicRepair = "恐慌修复"
 }
 
 /// 竞价选股结果
@@ -71,6 +82,21 @@ struct AuctionPick: Identifiable, Hashable {
     var reasons: [String]
     /// 风险提示
     var risks: [String]
+
+    /// 竞价分类（甜点 / 兑现风险 / 恐慌修复 / 常规）
+    var auctionClass: AuctionClass = .normal
+    /// 委买比 %（最新采样点的五档盘口）
+    var bidAskRatio: Double = 0
+    /// 昨日是否涨停（历史复核，日 K 口径；未复核时为 false 且 historyKnown 为 false）
+    var prevLimitUp: Bool = false
+    /// 以昨日为终点的连续涨停天数
+    var boardStreak: Int = 0
+    /// 昨日涨跌幅 %
+    var prevDayChangePct: Double = 0
+    /// 昨日收盘在当日区间的位置 0~1（越大收盘越强）
+    var prevCloseStrength: Double = 0
+    /// 历史基因是否已复核
+    var historyKnown: Bool = false
 
     var id: String { security.id }
 
