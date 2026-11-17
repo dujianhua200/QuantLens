@@ -9,7 +9,7 @@ jobs:
     # macos-14：Apple Silicon runner，Xcode 15 / Swift 5.9-5.10，
     # 与 Package.swift 的 swift-tools-version 5.9 与最低部署目标 macOS 14 一致，
     # 避免更新的 Xcode 默认 Swift 6 语言模式给旧代码带来新的并发警告噪音。
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Checkout
