@@ -1,0 +1,27 @@
+# SwiftPM
+.build/
+*.o
+*.d
+
+# App bundle output
+dist/
+
+# Xcode
+*.xcuserstate
+*.xcworkspace
+xcuserdata/
+DerivedData/
+*.xcodeproj/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
