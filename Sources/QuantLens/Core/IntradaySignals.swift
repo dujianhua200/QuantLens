@@ -137,8 +137,13 @@ enum IntradaySignals {
                 let p = pts[i]
                 guard p.avgPrice > 0 else { continue }
                 if p.price < p.avgPrice {
-                    dipIndex = i
-                    dipDepth = max(dipDepth, (p.avgPrice - p.price) / p.avgPrice)
+                    // 踩点取跌幅最深的那一分钟（与 dipDepth / dipLow 同一点），
+                    // 而不是最后一个在均价线下方的点
+                    let depth = (p.avgPrice - p.price) / p.avgPrice
+                    if depth > dipDepth {
+                        dipDepth = depth
+                        dipIndex = i
+                    }
                 }
             }
             if let di = dipIndex, dipDepth <= 0.015 {

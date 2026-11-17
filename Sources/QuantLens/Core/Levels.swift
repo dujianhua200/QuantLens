@@ -234,7 +234,7 @@ enum LevelEngine {
         var sourceCounts: [LevelSource: Int] = [:]
 
         init(price: Double, source: LevelSource, touches: Int, bonus: Double) {
-            self.sumPrice = price
+            self.sumPrice = price * source.weight
             self.weight = source.weight
             self.touches = touches
             self.bonus = bonus
