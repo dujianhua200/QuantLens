@@ -29,9 +29,9 @@ jobs:
         # 故用 bash 显式执行，不要改回 ./build_app.sh。
         run: bash build_app.sh
 
-      - name: Upload .app
+      - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: QuantLens-macOS
-          path: dist/QuantLens.app
+          path: dist/QuantLens.dmg
           retention-days: 7

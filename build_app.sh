@@ -152,7 +152,17 @@ codesign --force --deep --sign - "${APP_BUNDLE}" 2>&1 | grep -v "replacing exist
 echo "▸ 验证…"
 codesign -dv "${APP_BUNDLE}" 2>&1 | head -5
 
-SIZE=$(du -sh "${APP_BUNDLE}" | cut -f1)
+echo "▸ 制作 DMG…"
+DMG_STAGING="dist/dmg-staging"
+DMG_FILE="dist/QuantLens.dmg"
+rm -rf "${DMG_STAGING}" "${DMG_FILE}"
+mkdir -p "${DMG_STAGING}"
+cp -R "${APP_BUNDLE}" "${DMG_STAGING}/"
+ln -s /Applications "${DMG_STAGING}/Applications"
+hdiutil create -volname "QuantLens" -srcfolder "${DMG_STAGING}" -ov -format UDZO "${DMG_FILE}"
+rm -rf "${DMG_STAGING}"
+
+SIZE=$(du -sh "${DMG_FILE}" | cut -f1)
 echo ""
-echo "✓ 打包完成: ${APP_BUNDLE}  (${SIZE})"
-echo "  运行: open ${APP_BUNDLE}"
+echo "✓ 打包完成: ${DMG_FILE}  (${SIZE})"
+echo "  双击挂载后把 QuantLens 拖到 Applications"
